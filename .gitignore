@@ -1,0 +1,22 @@
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude Code session state
+.claude/
+
+# Backups produced by the patch script
+*.backup-subagent-thinking-*
+
+# Unrelated leftovers from the source download
+sqlite_mcp_server.db
+
+# Haleclipse's original scripts (please grab them from his linux.do post)
+apply-claude-code-subagent-thinking-fix.sh
+apply-claude-code-subagent-thinking-fix.ps1
+
+# Python
+__pycache__/
+*.pyc
