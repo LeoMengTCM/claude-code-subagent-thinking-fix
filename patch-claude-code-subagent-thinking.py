@@ -46,6 +46,12 @@ PATCHED_PATTERN = re.compile(
 )
 
 MIN_BINARY_BYTES = 10 * 1024 * 1024  # 10 MB —— 过滤掉 wrapper 脚本
+BACKUP_SUFFIX = ".backup-subagent-thinking-"
+
+
+def is_backup(path: Path) -> bool:
+    """脚本自己生成的备份文件不应再被当成候选目标。"""
+    return BACKUP_SUFFIX in path.name
 
 
 def find_install_root(override: str | None) -> Path | None:
@@ -100,6 +106,7 @@ def find_binaries(root: Path) -> list[Path]:
             if (
                 entry.is_file()
                 and not entry.is_symlink()
+                and not is_backup(entry)
                 and entry.stat().st_size >= MIN_BINARY_BYTES
             ):
                 found.append(entry)
