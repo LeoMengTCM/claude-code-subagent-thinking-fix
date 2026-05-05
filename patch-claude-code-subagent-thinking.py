@@ -72,6 +72,17 @@ def find_install_root(override: str | None) -> Path | None:
     for base in base_dirs:
         candidates.append(base / "@anthropic-ai" / "claude-code")
         candidates.append(base / "@cometix" / "claude-code")
+    # 原生安装器（2.1.120+ 推荐方式）：~/.local/share/claude/versions/<version>
+    # 以及官方 install.sh 可能选择的其他布局。
+    native_dirs = [
+        Path.home() / ".local/share/claude",
+        Path.home() / ".claude/local",
+        Path("/usr/local/share/claude"),
+        Path("/opt/claude"),
+    ]
+    for base in native_dirs:
+        if (base / "versions").is_dir():
+            candidates.append(base)
     for p in candidates:
         if p.is_dir():
             return p
@@ -79,8 +90,19 @@ def find_install_root(override: str | None) -> Path | None:
 
 
 def find_binaries(root: Path) -> list[Path]:
-    """收集 wrapper bin + 每个平台子包里的二进制 + Cometix 还原的 cli.js。"""
+    """收集 wrapper bin + 每个平台子包里的二进制 + Cometix 还原的 cli.js
+    + 原生安装器（~/.local/share/claude/versions/<ver>）下的裸二进制。"""
     found: list[Path] = []
+    # 原生安装器布局：root/versions/<version>（单个 Mach-O / ELF，无子目录）
+    versions_dir = root / "versions"
+    if versions_dir.is_dir():
+        for entry in sorted(versions_dir.iterdir()):
+            if (
+                entry.is_file()
+                and not entry.is_symlink()
+                and entry.stat().st_size >= MIN_BINARY_BYTES
+            ):
+                found.append(entry)
     # CometixSpace 还原版：根目录直接放 cli.js（不是二进制）
     cli_js = root / "cli.js"
     if cli_js.exists() and cli_js.is_file() and cli_js.stat().st_size >= MIN_BINARY_BYTES:
