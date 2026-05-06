@@ -1,4 +1,4 @@
-# Claude Code SubAgent thinkingConfig Patch
+# Claude Code SubAgent Patch
 
 中文 · [English](#english)
 
@@ -6,8 +6,12 @@
 
 ## 这是啥
 
-给 Claude Code CLI 的 SubAgent `thinkingConfig` 硬编码为 `{type:"disabled"}` 的 bug 打字节级 patch。
-原 bug 和首个 AST 修复脚本来自 **哈雷佬**：
+给 Claude Code CLI 的 SubAgent 打字节级 patch，修复两个导致第三方中转（如 anyrouter）路由失败的 bug：
+
+1. **thinkingConfig 硬编码为 `{type:"disabled"}`** —— 子代理始终不传 thinking 字段，anyrouter 后端校验不正确
+2. **Haiku 子代理缺 1M context beta header** —— 请求不带 `context-1m-2025-08-07`，anyrouter 网关直接 400
+
+原 bug（问题 1）的分析和首个 AST 修复脚本来自 **哈雷佬**：
 
 - <https://linux.do/t/topic/1991311>（原帖：SubAgent / Haiku 无法调用）
 - <https://linux.do/t/topic/1993426>（跟进：2.1.114 npm 包换 bun 编译的影响）
@@ -47,24 +51,29 @@ python3 patch-claude-code-subagent-thinking.py --restore
 | `@anthropic-ai/claude-code` | 2.1.113 | ✅ | Node SEA 时代 |
 | `@anthropic-ai/claude-code` | 2.1.114 | ✅ | bun compile 首发，APFS clonefile 副作用由脚本自动补签处理 |
 | `@anthropic-ai/claude-code` | 2.1.116 | ✅ | 同 2.1.114 |
+| `@anthropic-ai/claude-code` | 2.1.128–2.1.131 | ✅ | 原生安装器布局；两个修复均验证通过 |
 | `@cometix/claude-code` | 2.1.121 | ✅ | CometixSpace 还原版（cli.js）；纯 JS 文件，自动跳过 codesign |
 
 ## 它做了什么
 
-1. 自动定位 npm 全局安装里的 `@anthropic-ai/claude-code` 或 `@cometix/claude-code` 目录
+1. 自动定位原生安装（`~/.local/share/claude/versions/<ver>`）或 npm 全局安装里的 `@anthropic-ai/claude-code` 或 `@cometix/claude-code` 目录
 2. 找出所有目标文件：
+   - 原生安装：`versions/<ver>` 目录下的裸二进制
    - `@anthropic-ai/claude-code`：顶层 wrapper 二进制 + 平台子包二进制
    - `@cometix/claude-code`：包根目录的 `cli.js`
-3. 用宽松正则找 `thinkingConfig:X?Y.options.thinkingConfig:{type:"disabled"}`
-4. 用**等长度**的替换串（`/* 空格填充 */Y.options.thinkingConfig`）覆盖它，语义等价于"始终继承父级 thinkingConfig"
-5. 仅对 Mach-O 二进制做 `codesign --remove-signature` + `codesign -s -` ad-hoc 重签（通过 magic number 自动检测；纯 JS 文件如 Cometix 的 cli.js 跳过）
-6. 写备份文件到同目录（`<file>.backup-subagent-thinking-<timestamp>`）
-7. 如果文件已经是 patched 形态但 macOS 签名失效（APFS clonefile 共享存储导致），自动补签
+3. 用宽松正则找 `thinkingConfig:X?Y.options.thinkingConfig:{type:"disabled"}`（修复 1）
+4. 用宽松正则找 `if(FN(H))_.push(BETA);`（修复 2，即 1M context beta header 条件判断）
+5. 用**等长度**的替换串（`/* 空格填充 */`）覆盖它们：
+   - 修复 1：始终继承父级 thinkingConfig
+   - 修复 2：始终 push `context-1m-2025-08-07` beta header，不依赖模型判断
+6. 仅对 Mach-O 二进制做 `codesign --remove-signature` + `codesign -s -` ad-hoc 重签（通过 magic number 自动检测；纯 JS 文件如 Cometix 的 cli.js 跳过）
+7. 写备份文件到同目录（`<file>.backup-subagent-thinking-<timestamp>`）
+8. 如果文件已经是 patched 形态但 macOS 签名失效（APFS clonefile 共享存储导致），自动补签
 
 ## 常见问题
 
 - **升级后 `--check` 报 `未匹配`**
-  minifier 变量名变了，打开脚本把 `PATTERN` 里的 `{0,3}` 放宽到 `{0,5}` 再试。
+  minifier 变量名变了，打开脚本把 `PATTERN` 里的 `{0,3}` 放宽到 `{0,5}`、`PATTERN_1M` 里的 `{1,5}` 放宽到 `{1,7}` 再试。
 - **macOS 启动 `claude` 被 `killed`**
   签名失效。跑 `python3 ... --check`，或 `codesign -v` 手动确认，再重跑 patch 脚本。
 - **想彻底卸载 patch**
@@ -86,13 +95,16 @@ python3 patch-claude-code-subagent-thinking.py --restore
 
 <a name="english"></a>
 
-# Claude Code SubAgent thinkingConfig Patch (English)
+# Claude Code SubAgent Patch (English)
 
 ## What it is
 
-A byte-level patch for Claude Code CLI's bug where SubAgent `thinkingConfig` is hardcoded to `{type:"disabled"}`, preventing SubAgents from routing correctly on third-party relays.
+A byte-level patch for Claude Code CLI's SubAgent bugs that cause routing failures on third-party relays (e.g. anyrouter):
 
-Original bug analysis and the first AST-based fix come from **Haleclipse** on linux.do:
+1. **`thinkingConfig` hardcoded to `{type:"disabled"}`** — sub-agents never send a thinking field, causing backend validation failures
+2. **Haiku sub-agents missing the 1M context beta header** — requests without `context-1m-2025-08-07` get rejected by the relay gateway with a 400 error
+
+Original bug analysis (for issue 1) and the first AST-based fix come from **Haleclipse** on linux.do:
 
 - <https://linux.do/t/topic/1991311> — original post (SubAgent / Haiku unusable)
 - <https://linux.do/t/topic/1993426> — follow-up on 2.1.114 switching to bun compile
@@ -129,24 +141,30 @@ python3 patch-claude-code-subagent-thinking.py --restore
 | `@anthropic-ai/claude-code` | 2.1.113 | ✅ | Node SEA era |
 | `@anthropic-ai/claude-code` | 2.1.114 | ✅ | First Bun compile release; APFS clonefile side-effects auto-handled |
 | `@anthropic-ai/claude-code` | 2.1.116 | ✅ | Same as 2.1.114 |
+| `@anthropic-ai/claude-code` | 2.1.128–2.1.131 | ✅ | Native installer layout; both fixes verified |
 | `@cometix/claude-code` | 2.1.121 | ✅ | CometixSpace's restored `cli.js`; plain JS, codesign auto-skipped |
 
 ## What it does
 
-1. Auto-locates `@anthropic-ai/claude-code` or `@cometix/claude-code` in the npm global install
+1. Auto-locates the native install (`~/.local/share/claude/versions/<ver>`) or npm global install of `@anthropic-ai/claude-code` or `@cometix/claude-code`
 2. Finds every target file:
+   - Native install: bare binary under `versions/<ver>`
    - `@anthropic-ai/claude-code`: top-level wrapper binary + platform-subpackage binaries
    - `@cometix/claude-code`: the package-root `cli.js`
-3. Uses a loose regex to find `thinkingConfig:X?Y.options.thinkingConfig:{type:"disabled"}`
-4. Replaces it with an **equal-length** string (`/* <spaces> */Y.options.thinkingConfig`) — semantically "always inherit parent thinkingConfig"
+3. Uses loose regexes to find the two target patterns:
+   - Fix 1: `thinkingConfig:X?Y.options.thinkingConfig:{type:"disabled"}`
+   - Fix 2: `if(FN(H))_.push(BETA);` (the 1M context beta conditional)
+4. Replaces them with **equal-length** strings (`/* <spaces> */` padding):
+   - Fix 1: always inherits parent thinkingConfig
+   - Fix 2: always pushes `context-1m-2025-08-07` beta header, regardless of model
 5. Re-signs only Mach-O binaries via `codesign --remove-signature` + `codesign -s -` (auto-detected via magic number; plain JS files like Cometix's cli.js are skipped)
 6. Writes a backup next to the original (`<file>.backup-subagent-thinking-<timestamp>`)
 7. If a file is already patched but its macOS signature is invalid (APFS clonefile side-effect), re-signs it automatically
 
 ## Troubleshooting
 
-- **`--check` reports `未匹配` (not found) after upgrade**
-  The minifier renamed variables. Open the script and widen `{0,3}` to `{0,5}` in `PATTERN`.
+- **`--check` reports `未匹配` or `not found` after upgrade**
+  The minifier renamed variables. Open the script and widen `{0,3}` to `{0,5}` in `PATTERN`, and `{1,5}` to `{1,7}` in `PATTERN_1M`.
 - **macOS `claude` command is `killed` on launch**
   Signature invalidated. Run `python3 ... --check` or `codesign -v` to confirm, then re-run the patch.
 - **Uninstall the patch**

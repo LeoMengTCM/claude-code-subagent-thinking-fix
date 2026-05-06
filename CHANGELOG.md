@@ -6,6 +6,18 @@
 
 ---
 
+## [0.6.0] - 2026-05-06
+
+### 新增
+- **1M context beta header 修复**：针对 Haiku 子代理请求缺少 `context-1m-2025-08-07` beta header 导致 anyrouter 网关 400 的问题
+  - 新增 `PATTERN_1M` / `PATCHED_1M_PATTERN` 正则，匹配 `if(FN(H))_.push(BETA);` 模式
+  - 新增 `build_1m_replacement()` 构造等长度替换串，语义等价于始终 push 1M beta
+- `patch_file()` 重构为同时处理两个修复（thinkingConfig + 1M-beta），支持局部已 patch / 混合状态
+- `_check_codesign()` 辅助函数抽取，减少重复代码
+
+### 验证
+- `@anthropic-ai/claude-code` 2.1.128/2.1.129/2.1.131：两个修复 + 重签全部通过
+
 ## [0.5.0] - 2026-04-30
 
 ### 新增
@@ -73,6 +85,18 @@
 # Changelog (English)
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [0.6.0] - 2026-05-06
+
+### Added
+- **1M context beta header fix**: Haiku sub-agents now always send `context-1m-2025-08-07` beta header, preventing anyrouter gateway from returning 400
+  - Added `PATTERN_1M` / `PATCHED_1M_PATTERN` regexes matching `if(FN(H))_.push(BETA);` pattern
+  - Added `build_1m_replacement()` for equal-length replacement — unconditionally pushes the 1M beta
+- Refactored `patch_file()` to handle both fixes (thinkingConfig + 1M-beta), supporting partial / mixed states
+- Extracted `_check_codesign()` helper to reduce duplication
+
+### Verified
+- `@anthropic-ai/claude-code` 2.1.128/2.1.129/2.1.131: both fixes + codesign verified
 
 ## [0.5.0] - 2026-04-30
 

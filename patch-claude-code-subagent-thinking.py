@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-Claude Code SubAgent thinkingConfig 修复脚本 —— 版本无关的字节级 patch。
+Claude Code SubAgent 修复脚本 —— 针对第三方中转（如 anyrouter）场景的字节级 patch。
+
+修复两个问题：
+1. SubAgent thinkingConfig 硬编码为 {type:"disabled"}
+   → 改为继承父级 thinkingConfig
+2. Haiku 子代理不发送 1M context beta header（context-1m-2025-08-07）
+   → 强制始终发送（anyrouter 网关校验必须有此 header）
 
 适配单可执行文件分发的 Claude Code（约 2.1.112~2.1.113 的 Node SEA、
 2.1.114+ 的 Bun 编译产物），前提是 JS bundle 仍以明文嵌入二进制。
@@ -43,6 +49,29 @@ PATTERN = re.compile(
 PATCHED_PATTERN = re.compile(
     rb'thinkingConfig:/\*[\s]*\*/'
     rb'[A-Za-z_$][A-Za-z0-9_$]{0,3}\.options\.thinkingConfig'
+)
+
+# --- 修复 2：1M context beta header -------------------------------
+# 问题：Haiku 子代理不发送 context-1m-2025-08-07 beta header，
+# anyrouter 网关校验必须有此 header 才放行。
+#
+# 根因：Ko6 函数中 if(x0(H))_.push(wr); 判断模型是否原生支持 1M，
+# x0(H) 对 Haiku 返回 false，wr (context-1m-2025-08-07) 不会被
+# push 到 betas 数组。
+#
+# 修复：去掉条件判断，始终 push 1M beta —— 用注释填空保持等长。
+
+# 匹配形式：if(FN(H))_.push(BETA);
+# FN  = 判断函数（如 x0），BETA = beta 变量（如 wr）
+# {1,5} 字符宽松兼容 minifier 重命名
+PATTERN_1M = re.compile(
+    rb'if\((?P<fn>[A-Za-z_$][A-Za-z0-9_$]{1,5})\(H\)\)'
+    rb'_\.push\((?P<beta>[A-Za-z_$][A-Za-z0-9_$]{1,5})\);'
+)
+
+# 识别已 patch 形态：_.push(VAR);/* ... */
+PATCHED_1M_PATTERN = re.compile(
+    rb'_\.push\([A-Za-z_$][A-Za-z0-9_$]{1,5}\);/[*][\s]*[*]/'
 )
 
 MIN_BINARY_BYTES = 10 * 1024 * 1024  # 10 MB —— 过滤掉 wrapper 脚本
@@ -181,6 +210,24 @@ def build_replacement(match: re.Match) -> bytes:
     return replacement
 
 
+def build_1m_replacement(match: re.Match) -> bytes:
+    """构造等长度替换串 —— 去掉 if(FN(H)) 条件，始终 push 1M beta。"""
+    orig_len = match.end() - match.start()
+    beta = match.group("beta").decode()
+    # 目标形态：_.push(<beta>);/*<填空>*/
+    base = f"_.push({beta});".encode()
+    pad = orig_len - len(base)
+    if pad < 4:
+        raise RuntimeError(
+            f"替换模板比原匹配长（{len(base)} > {orig_len - 3}），"
+            "pattern / 模板不匹配"
+        )
+    # pad 中拿掉 4 字节给 /* */
+    replacement = f"_.push({beta});/*{' ' * (pad - 4)}*/".encode()
+    assert len(replacement) == orig_len, f"{len(replacement)} != {orig_len}"
+    return replacement
+
+
 def codesign_adhoc(path: Path) -> None:
     """去掉原签名后做 ad-hoc 自签。仅 macOS 使用。"""
     subprocess.run(
@@ -203,39 +250,90 @@ def codesign_is_valid(path: Path) -> bool:
     return r.returncode == 0
 
 
+def _check_codesign(path: Path, check_only: bool) -> tuple[str, int, str] | None:
+    """已 patch 状态下签名校验/修复。返回 None 表示签名正常无需处理。"""
+    if needs_codesign(path) and not check_only and not codesign_is_valid(path):
+        try:
+            codesign_adhoc(path)
+            return ("already", 0, "已 patch，签名之前损坏 → 已重签")
+        except subprocess.CalledProcessError as e:
+            return ("error", 0, f"已 patch 但重签失败：{e}")
+    return None
+
+
 def patch_file(path: Path, check_only: bool) -> tuple[str, int, str]:
     """
     返回 (状态, 匹配数, 说明)。
     状态 ∈ {'patched', 'would_patch', 'already', 'not_found', 'error'}
+    同时处理两个修复：thinkingConfig + 1M context beta header。
     """
     data = path.read_bytes()
-    matches = list(PATTERN.finditer(data))
-    if not matches:
-        if PATCHED_PATTERN.search(data):
-            # 已 patch。但在 macOS 上，如果 npm 的 clonefile / hardlink
-            # 把本文件和之前刚 patch 的兄弟二进制共享了存储，它的签名可能
-            # 是坏的 —— 防御性重签一下，免得启动被 SIGKILL。
-            if needs_codesign(path) and not check_only and not codesign_is_valid(path):
-                try:
-                    codesign_adhoc(path)
-                    return ("already", 0, "已 patch，签名之前损坏 → 已重签")
-                except subprocess.CalledProcessError as e:
-                    return ("error", 0, f"已 patch 但重签失败：{e}")
-            return ("already", 0, "已是 patched 形态")
-        return ("not_found", 0, "未匹配到模式，版本可能不兼容")
 
-    sample = matches[0]
-    detail = f'匹配到 {sample.group(0).decode()!r}'
+    # ---- 修复 1：thinkingConfig -----------------------------------
+    thinking_matches = list(PATTERN.finditer(data))
+    thinking_already = not thinking_matches and PATCHED_PATTERN.search(data)
+    thinking_found = bool(thinking_matches) or thinking_already
+
+    # ---- 修复 2：1M context beta header ----------------------------
+    m1_matches = list(PATTERN_1M.finditer(data))
+    m1_already = not m1_matches and PATCHED_1M_PATTERN.search(data)
+    m1_found = bool(m1_matches) or m1_already
+
+    total_matches = len(thinking_matches) + len(m1_matches)
+    both_already = thinking_already and m1_already
+
+    if total_matches == 0:
+        if both_already:
+            # 全部已 patch。仅校验签名。
+            cs = _check_codesign(path, check_only)
+            if cs:
+                return cs
+            return ("already", 0, "已是 patched 形态（全部）")
+
+        # 一个或两个都未匹配
+        missing: list[str] = []
+        if not thinking_found:
+            missing.append("thinkingConfig")
+        if not m1_found:
+            missing.append("1M-context-beta")
+        if missing:
+            return ("not_found", 0,
+                    f"未匹配到: {', '.join(missing)}，版本可能不兼容")
+        # 理论上不会到这里（两者都没匹配但 not_found 也没标记）
+        return ("not_found", 0, "未匹配到任何模式，版本可能不兼容")
+
+    # 构造详情
+    parts: list[str] = []
+    if thinking_matches:
+        sample = thinking_matches[0].group(0).decode()
+        parts.append(f"thinkingConfig={sample!r}")
+    elif thinking_already:
+        parts.append("thinkingConfig（已是 patched 形态）")
+    else:
+        parts.append("thinkingConfig（未匹配）")
+
+    if m1_matches:
+        sample_1m = m1_matches[0].group(0).decode()
+        parts.append(f"1M-beta={sample_1m!r}")
+    elif m1_already:
+        parts.append("1M-beta（已是 patched 形态）")
+    else:
+        parts.append("1M-beta（未匹配）")
+
+    detail = "，".join(parts)
 
     if check_only:
-        return ("would_patch", len(matches), detail)
+        return ("would_patch", total_matches, detail)
 
-    # 从右向左替换（虽然长度不变，保险起见）
+    # ---- 应用替换（从右向左，长度不变）--------------------------
     new_data = bytearray(data)
-    for m in reversed(matches):
+    for m in reversed(thinking_matches):
         new_data[m.start(): m.end()] = build_replacement(m)
+    for m in reversed(list(PATTERN_1M.finditer(data))):
+        new_data[m.start(): m.end()] = build_1m_replacement(m)
+
     if len(new_data) != len(data):
-        return ("error", 0, "长度发生变化 —— 放弃写入")
+        return ("error", 0, "长度发生变化 —— 放弃写入（文件未修改）")
 
     ts = time.strftime("%Y-%m-%d_%H-%M-%S")
     backup = path.with_name(path.name + f".backup-subagent-thinking-{ts}")
@@ -248,9 +346,9 @@ def patch_file(path: Path, check_only: bool) -> tuple[str, int, str]:
             codesign_adhoc(path)
             extra = "，ad-hoc 重签完成"
         except subprocess.CalledProcessError as e:
-            return ("error", len(matches), f"codesign 失败：{e}")
+            return ("error", total_matches, f"codesign 失败：{e}")
 
-    return ("patched", len(matches), f"备份={backup.name}{extra}")
+    return ("patched", total_matches, f"备份={backup.name}{extra}")
 
 
 def restore_latest(path: Path) -> tuple[str, str]:
